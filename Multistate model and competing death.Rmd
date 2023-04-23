@@ -1,0 +1,517 @@
+---
+title: "Multistate model and competing risk of death"
+author: "Thach Tran"
+date: "26/09/2021"
+output:
+  html_document:
+    df_print: paged
+---
+# Competing Death and Fracture Risk Assessment
+
+```{r}
+library(survival); library(tableone); library(prodlim); library(riskRegression); library(CalibrationCurves)
+```
+
+Data preparation
+
+```{r datasets}
+wpp<- read.csv("C:\\Thach\\Research projects\\MSM and competing risk\\Data_Analysis\\wpp_60.csv")
+head(wpp)
+
+```
+
+## Table 1
+
+```{r}
+factorVars <- c("group","sex","falls_n","prior_fx","cvd_0","respi_0","diabetes_0","hypert_0","cancer_0","rheum_0","neuro_0")
+Vars <- c("sex","age","fnbmd","falls_n","prior_fx","kmfu_fx","kmfu_death","BMI_0","cvd_0","respi_0","diabetes_0","hypert_0","cancer_0","rheum_0","neuro_0")
+table.1 <- CreateTableOne(vars = Vars, strata = "group", data = wpp, factorVars = factorVars)
+print(table.1, nonnormal = c("kmfu_fx","kmfu_death"))
+
+```
+
+## Table 2
+
+### (2.1) Conventional method
+#### (2.1.1) Kaplan-Meier curve
+
+```{r Conventional method}
+table(wpp$Fx1st_any, wpp$sex)
+mfit.con.f <- survfit(Surv(kmfu_fx, Fx1st_any) ~ sex, data = wpp) 
+  mfit.con.f
+
+table(wpp$death, wpp$sex)
+mfit.con.d <- survfit(Surv(kmfu_death, death) ~ sex, data = wpp) 
+  mfit.con.d
+
+```
+
+#### (2.1.2) Cox's PH model
+
+```{r Conventional- Cox model}
+# Conventional model for fracture
+cfit.con.f <- coxph(Surv(kmfu_fx, Fx1st_any) ~ sex + age + fnbmd + falls_n + prior_fx, 
+                data = wpp, id = StudyID)
+  summary(cfit.con.f)
+  zph.cfit0f <- cox.zph(cfit.con.f)
+  zph.cfit0f
+
+## Proportional hazards assumption
+windows(width = 14, height = 12)
+par(mfrow = c(3,2), oma = c(0,0,2,0))
+plot(zph.cfit0f[1]) 
+  abline(h=coef(cfit.con.f)[1], lty=2, col=2)
+plot(zph.cfit0f[2]) 
+  abline(h=coef(cfit.con.f)[2], lty=2, col=2)  
+plot(zph.cfit0f[3]) 
+  abline(h=coef(cfit.con.f)[3], lty=2, col=2)  
+plot(zph.cfit0f[4]) 
+  abline(h=coef(cfit.con.f)[4], lty=2, col=2)
+plot(zph.cfit0f[5]) 
+  abline(h=coef(cfit.con.f)[5], lty=2, col=2)
+mtext("Proportional hazards assumption- Conventional model", line=0, side=3, outer=TRUE, cex=1.8)
+
+# Conventional model for death without fracture  
+cfit.con.d <- coxph(Surv(kmfu_death, death) ~ sex + age + fnbmd + falls_n + prior_fx, 
+                data = wpp, id = StudyID)
+  summary(cfit.con.d)
+  zph.cfit0d <- cox.zph(cfit.con.d)
+  zph.cfit0d
+
+```
+
+### (2.2) Competing risk methods
+
+Data preparation
+
+```{r Competing risk method}
+etime <- with(wpp, ifelse(Fx1st_any == 0, kmfu_death, kmfu_fx))
+event <- with(wpp, ifelse(Fx1st_any == 0, 2*death, 1))
+event <- factor(event, 0:2, labels=c("Event-free", "Fracture", "Death")) 
+table(event)
+
+```
+
+#### (2.2.1) Descriptive Kaplan-Meier curves
+
+```{r Competing risk- KM curve}
+mfit.cs <- survfit(Surv(etime, event) ~ sex, data = wpp) 
+  print(mfit.cs)
+mfit.cs$transitions 
+
+windows(width = 16, height = 12)
+par(mfrow = c(1,2), oma = c(0,0,2,0))
+
+plot(mfit.con.f[2], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE, 
+     xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(mfit.con.d[2], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE) 
+  lines(mfit.cs[2,2], mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.cs[2,3], mark.time = FALSE, col = "red", lty = 2, lwd = 2, conf.int = FALSE) 
+  title(main = "Women", cex.main = 1.2)
+plot(mfit.con.f[1], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE, 
+       xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(mfit.con.d[1], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE) 
+  lines(mfit.cs[1,2], mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.cs[1,3], mark.time = FALSE, col = "red", lty = 2, lwd = 2, conf.int = FALSE) 
+  title(main = "Men", cex.main = 1.2)
+legend("topleft", c("Fracture (Conventional)","Death (Conventional)", "Fracture (Competing risk)", "Death (Competing risk)"), 
+       col = c("black","black","red","red"), lty = c(1,2,1,2), lwd = 2, bty = 'n', cex = 0.8)
+mtext("Risk of fracture and death by different methods", line = 0, side = 3, 
+      outer = TRUE, cex = 1.6)
+
+```
+
+### (2.2.2) Cause-specific method
+
+```{r Cause-specific}
+## For descriptive graphs:
+csfit <- coxph(Surv(etime, event) ~ sex + age + fnbmd + falls_n + prior_fx, 
+               data = wpp, id = StudyID) 
+summary(csfit)
+
+## Checking PH assumption
+summary(csfit)
+  zph.csfit <- cox.zph(csfit)
+  zph.csfit
+  
+windows(width = 14, height = 12)
+par(mfrow=c(2,5), oma=c(0,0,2,0))
+  
+plot(zph.csfit[1]) 
+  abline(h=coef(csfit)[1], lty=2, col=1)
+  title(main = "Fracture model")
+plot(zph.csfit[2]) 
+  abline(h=coef(csfit)[2], lty=2, col=1)
+plot(zph.csfit[3]) 
+  abline(h=coef(csfit)[3], lty=2, col=1)
+plot(zph.csfit[4]) 
+  abline(h=coef(csfit)[4], lty=2, col=1)
+plot(zph.csfit[5]) 
+  abline(h=coef(csfit)[5], lty=2, col=1)
+plot(zph.csfit[6]) 
+  abline(h=coef(csfit)[6], lty=2, col=2)
+  title(main = "Mortality model")
+plot(zph.csfit[7]) 
+  abline(h=coef(csfit)[7], lty=2, col=2)
+plot(zph.csfit[8]) 
+  abline(h=coef(csfit)[8], lty=2, col=2)
+plot(zph.csfit[9]) 
+  abline(h=coef(csfit)[9], lty=2, col=2)
+plot(zph.csfit[10]) 
+  abline(h=coef(csfit)[10], lty=2, col=2)
+mtext("Proportional hazards assumption: Cause-specific model", line=0, side=3, outer=TRUE, cex=1.8)
+
+# For prediction of absolute risk: 'CSC' from riskRegression using the combined coefficients
+CSC.fit <- CSC(Hist(etime, event)~ sex + age + fnbmd + falls_n + prior_fx, 
+               data = wpp, method = "breslow")
+  print(CSC.fit)
+
+```
+
+#### (2.2.3) Fine-Gray method
+
+```{r Fine-Gray}
+fgdata.fx <- finegray(Surv(etime, event) ~ ., data = wpp, etype = "Fracture") 
+fgdata.death <- finegray(Surv(etime, event) ~ ., data = wpp, etype = "Death") 
+
+mfit.fg <- survfit(Surv(fgstart, fgstop, fgstatus) ~ sex, data = fgdata.fx)
+
+fgfit.f <- coxph(Surv(fgstart, fgstop, fgstatus) ~ sex + age + fnbmd + falls_n + prior_fx,
+                 data = fgdata.fx, weight= fgwt) 
+summary(fgfit.f) 
+  zph.fgfit.f <- cox.zph(fgfit.f)
+  zph.fgfit.f
+
+windows(width = 14, height = 12)
+par(mfrow=c(3,2), oma=c(0,0,2,0))
+
+plot(zph.fgfit.f[1]) 
+  abline(h=coef(fgfit.f)[1], lty=2, col=2)
+plot(zph.fgfit.f[2]) 
+  abline(h=coef(fgfit.f)[2], lty=2, col=2)
+plot(zph.fgfit.f[3]) 
+  abline(h=coef(fgfit.f)[3], lty=2, col=2)
+plot(zph.fgfit.f[4]) 
+  abline(h=coef(fgfit.f)[4], lty=2, col=2)
+plot(zph.fgfit.f[5]) 
+  abline(h=coef(fgfit.f)[5], lty=2, col=2)
+mtext("Proportional hazards assumption: Fine-Gray model", line=0, side=3, outer=TRUE, cex=1.8)
+
+```
+
+#### (2.2.4) Multi-state model
+
+```{r Multistate}
+msm.data <- tmerge(wpp, wpp, id = StudyID, death = event(kmfu_death, death), 
+                   Fx1st_any = event(kmfu_fx, Fx1st_any)) 
+msm.data <- tmerge(msm.data, msm.data, StudyID, enum = cumtdc(tstart)) 
+  head(msm.data)
+with(msm.data, table(death, Fx1st_any))
+temp <- with(msm.data, ifelse(death==1, 2, Fx1st_any))
+
+msm.data$event <- factor(temp, 0:2, labels=c("Event-free", "Fracture", "Death")) 
+mfit.msm1 <- survfit(Surv(tstart, tstop, event) ~ sex, data = msm.data, id = StudyID)
+  mfit.msm1
+mfit.msm1$transitions
+
+temp2 <- with(msm.data, ifelse(enum==2 & event=='Death', 4, as.numeric(event))) 
+table(temp2)
+temp3 <- factor(temp2, labels=c("Event-free", "Fracture", "Death w/o fracture", "Death post fracture")) 
+table(temp3)
+mfit.msm2 <- survfit(Surv(tstart, tstop, temp3) ~ sex, data = msm.data, id = StudyID)
+  print(mfit.msm2)
+
+msmfit <- coxph(Surv(tstart, tstop, event) ~ sex + age +fnbmd + falls_n + prior_fx, 
+                data = msm.data, id = StudyID)
+  summary(msmfit)
+
+# Proportional hazards assumption:
+zph.msmfit <- cox.zph(msmfit)
+zph.msmfit
+
+windows(width = 14, height = 12)
+par(mfrow=c(3,2), oma=c(0,0,2,0))
+
+plot(zph.msmfit[1]) 
+abline(h=coef(msmfit)[1], lty=2, col=2)
+plot(zph.msmfit[2]) 
+abline(h=coef(msmfit)[2], lty=2, col=2)
+plot(zph.msmfit[3]) 
+abline(h=coef(msmfit)[3], lty=2, col=2)
+plot(zph.msmfit[4]) 
+abline(h=coef(msmfit)[4], lty=2, col=2)
+plot(zph.msmfit[5]) 
+abline(h=coef(msmfit)[5], lty=2, col=2)
+mtext("Proportional hazards assumption: Multistate model", line=0, side=3, outer=TRUE, cex=1.8)
+  
+```
+
+#### Survival curves for different methods - Summmary
+
+```{r KM curves for different methods}
+windows(width = 16, height = 12)
+par(mfrow=c(1,2), oma=c(0,0,2,0))
+
+plot(mfit.con.f[2], col = "black", lty = 1, fun = "event", mark.time = FALSE, lwd = 2, conf.int = FALSE, 
+     xlab="Time to event (years)", ylab="Probability of event", ylim = c(0,1))
+  lines(mfit.con.d[2], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE) 
+  lines(mfit.cs[2,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.fg[2], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.msm2[2,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.msm2[2,4], fun = "event", mark.time = FALSE, col = "green", lty = 3, lwd = 2, conf.int = FALSE)
+  title(main= "Women")
+plot(mfit.con.f[1], col = "black", lty = 1, fun = "event", mark.time = FALSE, lwd = 2, conf.int = FALSE, 
+       xlab="Time to event (years)", ylab="Probability in State", ylim = c(0,1))
+  lines(mfit.con.d[1], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE) 
+  lines(mfit.cs[1,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.fg[1], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.msm2[1,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(mfit.msm2[1,4], fun = "event", mark.time = FALSE, col = "green", lty = 3, lwd = 2, conf.int = FALSE)
+  legend("topleft", c("Fracture (Conventional)", "Death (Conventional)", "Fracture (Cause-specific)", 
+                      "Fracture (Fine-Gray)", "Fracture (Multistate)", "Death post fracture (Multistate)"), 
+         col = c("black","black","red","blue","green","green"), lty = c(1,2,1,1,1,3), lwd = 2, bty = 'n', cex = 0.8)
+  title(main= "Men") 
+mtext("Difference in fracture incidence by competing risk models", line = 0, side = 3, outer = TRUE, cex = 2)
+
+```
+
+## (2) Validation of the model performance
+
+### (2.1) Predicting fracture risk for individuals with different risk profiles
+
+Individuals with different risk profiles
+
+```{r Different risk profiles}
+subj.50<- expand.grid(sex = c(0,1), age = 50, fnbmd = 2.5, falls_n = 0, prior_fx = 0)
+subj.60<- expand.grid(sex = c(0,1), age = 60, fnbmd = 2.5, falls_n = 0, prior_fx = 0)
+subj.70<- expand.grid(sex = c(0,1), age = 70, fnbmd = 2.5, falls_n = 0, prior_fx = 0)
+subj.80<- expand.grid(sex = c(0,1), age = 80, fnbmd = 2.5, falls_n = 0, prior_fx = 0)
+
+```
+
+Fracture risk estimated from different methods
+
+```{r Predicted risks- different methods}
+options(digits = 10)
+# Conventional #
+con.fx.50 <- survfit(cfit.con.f, newdata = subj.50)
+  con.fx.60 <- survfit(cfit.con.f, newdata = subj.60)
+  con.fx.70 <- survfit(cfit.con.f, newdata = subj.70)
+  con.fx.80 <- survfit(cfit.con.f, newdata = subj.80)
+con.d.50 <- survfit(cfit.con.d, newdata = subj.50)
+  con.d.60 <- survfit(cfit.con.d, newdata = subj.60)
+  con.d.70 <- survfit(cfit.con.d, newdata = subj.70)
+  con.d.80 <- survfit(cfit.con.d, newdata = subj.80)
+# Cause-specific #
+cs.all.50 <- survfit(csfit, newdata = subj.50)
+  cs.all.60 <- survfit(csfit, newdata = subj.60)
+  cs.all.70 <- survfit(csfit, newdata = subj.70)
+  cs.all.80 <- survfit(csfit, newdata = subj.80)
+# Fine-Gray #
+fg.fx.50 <- survfit(fgfit.f, newdata = subj.50)
+  fg.fx.60 <- survfit(fgfit.f, newdata = subj.60)
+  fg.fx.70 <- survfit(fgfit.f, newdata = subj.70)
+  fg.fx.80 <- survfit(fgfit.f, newdata = subj.80)
+# Multistate #
+msm.50 <- survfit(msmfit, newdata = subj.50)
+  msm.60 <- survfit(msmfit, newdata = subj.60)
+  msm.70 <- survfit(msmfit, newdata = subj.70)
+  msm.80 <- survfit(msmfit, newdata = subj.80)
+
+```
+
+A graphical example for a woman with different ages, BMD Tscore -2.5, no falls, no prior fracture
+
+```{r A woman}
+windows(width = 14, height = 12)
+par(mfrow = c(2,2), oma = c(0,0,2,0))
+
+plot(con.d.50[2], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+     xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.50[2], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.50[2,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.50[2], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.50[2,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "A. 50 years old", adj = 0, cex.main = 1.2)
+  legend("topleft", c("Death without fracture","Fracture (Conventional)","Fracture (Cause-specific)", "Fracture (Fine-Gray)", "Fracture (Multistate)"), 
+         col = c("black","black","red","blue","green"), lty = c(2,1,1,1,1), lwd = 2, bty = 'n', cex = 0.8)
+plot(con.d.60[2], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+       xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.60[2], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.60[2,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.60[2], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.60[2,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "B. 60 years old", adj = 0, cex.main = 1.2)
+plot(con.d.70[2], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+       xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.70[2], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.70[2,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.70[2], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.70[2,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "C. 70 years old", adj = 0, cex.main = 1.2)
+plot(con.d.80[2], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+       xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.80[2], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.80[2,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.80[2], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.80[2,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "D. 80 years old", adj = 0, cex.main = 1.2)
+mtext("A woman with BMDT-score -2.5, no falls, no prior fracture", line = 0, side = 3, 
+        outer = TRUE, cex = 1.6)
+```
+
+A graphical example for a man with different ages, BMD Tscore -2.5, no fall, no prior fracture
+
+```{r A man}
+windows(width = 14, height = 12)
+par(mfrow = c(2,2), oma = c(0,0,2,0))
+
+plot(con.d.50[1], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+     xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.50[1], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.50[1,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.50[1], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.50[1,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "A. 50 years old", adj = 0, cex.main= 1.2)
+legend("topleft", c("Death without fracture","Fracture (Conventional)","Fracture (Cause-specific)", "Fracture (Fine-Gray)", "Fracture (Multistate)"), 
+       col = c("black","black","red","blue","green"), lty = c(2,1,1,1,1), lwd = 2, bty = 'n', cex = 0.8)
+plot(con.d.60[1], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+     xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.60[1], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.60[1,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.60[1], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.60[1,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "B. 60 years old", adj = 0, cex.main= 1.2)
+plot(con.d.70[1], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+     xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.70[1], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.70[1,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.70[1], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.70[1,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "C. 70 years old", adj = 0, cex.main= 1.2)
+plot(con.d.80[1], fun = "event", mark.time = FALSE, col = "black", lty = 2, lwd = 2, conf.int = FALSE, 
+     xlab="Time (years)", ylab="Probability", ylim = c(0,1)) 
+  lines(con.fx.80[1], fun = "event", mark.time = FALSE, col = "black", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(cs.all.80[1,2], fun = "event", mark.time = FALSE, col = "red", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(fg.fx.80[1], fun = "event", mark.time = FALSE, col = "blue", lty = 1, lwd = 2, conf.int = FALSE) 
+  lines(msm.80[1,2], fun = "event", mark.time = FALSE, col = "green", lty = 1, lwd = 2, conf.int = FALSE)
+  title(main = "D. 80 years old", adj = 0, cex.main= 1.2)
+mtext("A man with BMDT-score -2.5, no falls, no prior fracture", line = 0, side = 3, 
+      outer = TRUE, cex = 1.6)
+```
+
+Baseline hazards from different methods
+
+```{r Predicted risks- Baseline hazards}
+subj.base.mean <- expand.grid(sex = 0.63, age = 69.7, fnbmd = 1.38, falls_n = 0.24, prior_fx = 0.14) 
+  subj.base.mean
+
+# Conventional #
+summary(cfit.con.f)
+con.fx.basem <- survfit(cfit.con.f, newdata = subj.base.mean)
+  summary(con.fx.basem, time = c(1,5,10,15,20,25))
+
+# Cause-specific (not needed as the 'CSC' was used) #
+
+# Fine-Gray #
+summary(fgfit.f) 
+fg.fx.basem <- survfit(fgfit.f, newdata = subj.base.mean)
+  summary(fg.fx.basem, time = c(1,5,10,15,20,25))
+
+# MSM #
+summary(msmfit)
+msm.basem <- survfit(msmfit, newdata = subj.base.mean)
+  summary(msm.basem, time = c(1,5,10,15,20,25))
+
+```
+
+Data preparation
+
+```{r Validation- data preparation}
+wpp_val <- read.csv("C:\\Thach\\Research projects\\MSM and competing risk\\Data_Analysis\\wpp_40.csv")
+head(wpp_val)
+
+```
+
+### Calculating absolute risks from different methods
+
+```{r Prediction of absolute risk}
+# Conventional
+wpp_val$pifx_con = 0.362089*(wpp_val$sex - 0.63) + 0.032855*(wpp_val$age - 69.7) + 0.406531*(wpp_val$fnbmd - 1.38) + 0.071357*(wpp_val$falls_n - 0.24) + 0.653381*(wpp_val$prior_fx - 0.14);
+	wpp_val$riskfx_con1y = 1- 0.980225**exp(wpp_val$pifx_con)
+	wpp_val$riskfx_con5y = 1- 0.896544**exp(wpp_val$pifx_con)
+	wpp_val$riskfx_con10y = 1- 0.772820**exp(wpp_val$pifx_con)
+	wpp_val$riskfx_con15y = 1- 0.625878**exp(wpp_val$pifx_con)
+
+# Cause-specific
+CSC.risk <- predict(CSC.fit, newdata = wpp_val, times = c(1,5,10,15), cause = "Fracture")
+  CSC.dat <- data.frame(CSC.risk$absRisk)
+
+# Fine-Gray
+wpp_val$pifx_fg = 0.5421*(wpp_val$sex - 0.63) - 0.006379*(wpp_val$age - 69.7) + 0.34393*(wpp_val$fnbmd - 1.38) + 0.184146*(wpp_val$falls_n - 0.24) + 0.483274*(wpp_val$prior_fx - 0.14);
+	wpp_val$riskfx_fg1y = 1- 0.978008**exp(wpp_val$pifx_fg)
+	wpp_val$riskfx_fg5y = 1- 0.893006**exp(wpp_val$pifx_fg)
+	wpp_val$riskfx_fg10y = 1- 0.791379**exp(wpp_val$pifx_fg)
+	wpp_val$riskfx_fg15y = 1- 0.698662**exp(wpp_val$pifx_fg)
+
+# Multistate
+wpp_val$pifx_msm = 0.369125*(wpp_val$sex - 0.63) + 0.03284*(wpp_val$age - 69.7) + 0.40572*(wpp_val$fnbmd - 1.38) + 0.071629*(wpp_val$falls_n - 0.24) + 0.65355*(wpp_val$prior_fx - 0.14);
+	wpp_val$riskfx_msm1y = 1- (1- 0.01921503)**exp(wpp_val$pifx_msm)
+	wpp_val$riskfx_msm5y = 1- (1- 0.0915173)**exp(wpp_val$pifx_msm)
+	wpp_val$riskfx_msm10y = 1- (1- 0.1580615)**exp(wpp_val$pifx_msm)
+	wpp_val$riskfx_msm15y = 1- (1- 0.1803618)**exp(wpp_val$pifx_msm)
+
+```
+
+### (2.3) Baseline characteristics of the validation cohort
+
+```{r Baseline characteristics}
+table.1v <- CreateTableOne(vars = Vars, strata = "group", data = wpp_val, factorVars = factorVars)
+print(table.1v, nonnormal = c("kmfu_fx","kmfu_death"))
+
+```
+
+### Figure 2: Prediction accuracy of different models in the 5-year fracture risk prediction
+
+```{r Predicting 5-y risk}
+windows(width = 16, height = 12)
+par(mfrow=c(2,2), oma=c(0,0,2,0))
+val.prob.ci.2(wpp_val$riskfx_con5y, wpp_val$fx_5y, pl = T, logistic.cal = F, g = 10, smooth = "none", xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.45), xlim = c(0,0.45),  cex.axis = .8, cex.lab = 1, statloc = c(-0.01, 0.35), cex = .8)
+title(main= "A. Conventional Cox's PH model", adj = 0, cex.main = 1.4)
+val.prob.ci.2(CSC.dat$X2, wpp_val$fx_5y, pl = T, logistic.cal = F, g = 10, smooth = "none", xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.45), xlim = c(0,0.45),  cex.axis = .8, cex.lab = 1, statloc = c(-0.01, 0.35), cex = .8)
+title(main= "B. Cause-specific model", adj = 0, cex.main = 1.4)
+val.prob.ci.2(wpp_val$riskfx_fg5y, wpp_val$fx_5y, pl = T, logistic.cal = F, g = 10, smooth = "none", xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.45), xlim = c(0,0.45), cex.axis = .8, cex.lab = 1, statloc = c(-0.01, 0.35), cex = .8)
+title(main= "C. Fine-Gray model", adj = 0, cex.main = 1.4)
+val.prob.ci.2(wpp_val$riskfx_msm5y, wpp_val$fx_5y, pl = T, logistic.cal = F, g = 10, smooth = "none", xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.45), xlim = c(0,0.45), cex.axis = .8, cex.lab = 1, statloc = c(-0.01, 0.35), cex = .8, legendloc = c(0.2,0.1), cex.leg = .8)
+title(main= "D. Multistate model", adj = 0, cex.main = 1.4)
+mtext("Prediction of 5-year fracture risk", line = 0, side = 3, outer = TRUE, cex = 2)
+
+```
+
+### Figure 3: Prediction accuracy of different models in the 10-year fracture risk prediction
+
+```{r Predicting 10-y risk}
+windows(width = 16, height = 12)
+par(mfrow=c(2,2), oma=c(0,0,2,0))
+val.prob.ci.2(wpp_val$riskfx_con10y, wpp_val$fx_10y, pl = T, logistic.cal = F, g = 10, smooth = "none", 
+              xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.8), xlim = c(0,0.8),  cex.axis = .8, cex.lab = 1, 
+              statloc = c(-0.02, 0.62), cex = .8, legendloc = c(0,0))
+title(main= "A. Conventional Cox's PH model", adj = 0, cex.main = 1.4)
+val.prob.ci.2(CSC.dat$X3, wpp_val$fx_10y, pl = T, logistic.cal = F, g = 10, smooth = "none", 
+              xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.8), xlim = c(0,0.8),  cex.axis = .8, cex.lab = 1, 
+              statloc = c(-0.02, 0.62), cex = .8, legendloc = c(0,0))
+title(main= "B. Cause-specific model", adj = 0, cex.main = 1.4)
+val.prob.ci.2(wpp_val$riskfx_fg10y, wpp_val$fx_10y, pl = T, logistic.cal = F, g = 10, smooth = "none", 
+              xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.8), xlim = c(0,0.8), cex.axis = .8, cex.lab = 1,  
+              statloc = c(-0.02, 0.62), cex = .8, legendloc = c(0,0)) 
+title(main= "C. Fine-Gray model", adj = 0, cex.main = 1.4)
+val.prob.ci.2(wpp_val$riskfx_msm10y, wpp_val$fx_10y, pl = T, logistic.cal = F, g = 10, smooth = "none",  
+              xlab="Predicted risk", ylab="Observed risk", ylim = c(0, 0.8), xlim = c(0,0.8), cex.axis = .8, cex.lab = 1,  
+              statloc = c(-0.02, 0.62), cex = .8, legendloc = c(0.45,0.2), cex.leg = .8)
+title(main= "D. Multistate model", adj = 0, cex.main = 1.4)
+mtext("Prediction of 10-year fracture risk", line = 0, side = 3, outer = TRUE, cex = 2)
+
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, nrow=3)
+
+```
+
